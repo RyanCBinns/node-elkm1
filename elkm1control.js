@@ -11,12 +11,65 @@ function zeroPad(str, numDigits) {
 	return str;
 }
 
+var m1Control = null;
 function M1Control(){
 	this.zones=[];
 	this.controlMessageHandler = null;
+	this.connection = null;
 }
 
-var m1Control = new M1Control();
+//M1Control.prototype = new EventEmitter();
+M1Control.prototype.initControl = function(socket) {
+	this.connection = socket;
+	this.controlMessageHandler = new ControlMessageHandler();
+	return this.getZoneDefinitions();
+}
+
+M1Control.prototype.updateControl = function(obj) {
+	var controlUpdateResult = obj.updateControl(this);
+	if (!controlUpdateResult)
+		return Promise.reject("Unknown failure");
+	if (!controlUpdateResult.result) {
+		return Promise.reject(controlUpdateResult.reason);
+	}
+}
+
+M1Control.prototype.printZoneDefinitions = function() {
+	console.log("Zone Definitions");
+	for (let i = 0; i < this.zones.length; ++i) {
+		let curZone = this.zones[i];
+		console.log("ZoneID: " + curZone.zoneId + " Zone Name: " + curZone.zoneName + " Type: " + curZone.zoneDefinition.zoneTypeDescription);
+	}
+}
+
+M1Control.prototype.getZoneDefinitions = function() {
+	var zd = new ZoneDefinitionRequest();
+	var updateThisControl = this.updateControl.bind(this);
+	var getThisZoneNames = this.getZoneNames.bind(this);
+	var printThisDefinitions = this.printZoneDefinitions.bind(this);
+	return zd.request(this.connection, this.controlMessageHandler).then(updateThisControl).then(getThisZoneNames).then(printThisDefinitions);
+}
+
+M1Control.prototype.getZoneNames = function() {
+	var thisConnection = this.connection;
+	var thisHandler = this.controlMessageHandler;
+	var promiseChain = null;
+	var updateThisControl = this.updateControl.bind(this);
+	for (let i = 0; i < this.zones.length; ++i) {
+		if (!this.zones[i].zoneName) {
+			let sd = new ASCIIStringDefinitionRequest(ASCIIStringDefinitionType.ZONE_NAME, this.zones[i].zoneId);
+			if (!promiseChain) {
+				promiseChain = sd.request(thisConnection, thisHandler).then(updateThisControl);
+			}
+			else {
+				promiseChain = promiseChain.then(function() { return sd.request(thisConnection, thisHandler); }).then(updateThisControl);
+			}
+		}
+	}
+	return promiseChain;
+}
+
+m1Control = new M1Control();
 
 var ControlMessageType = {
 	UNDEFINED : "undefined",
@@ -83,7 +136,7 @@ ControlMessage.prototype.sendMessage=function(socket) {
 		return;
 	}
 
-	console.log('Sending: ' + this.rawMessage);
+	//console.log('Sending: ' + this.rawMessage);
 	socket.write(this.rawMessage);
 }
 ControlMessage.prototype.getCommand=function() {
@@ -105,6 +158,10 @@ ControlMessage.prototype.getPayload=function() {
 		return "";
 	}
 	return this.rawMessage.substring(4, this.rawMessage.length-2);  // Don't need the checksum on the end
+}
+
+function UpdateControlResult(result, reason) {
+	return { result: result, reason: reason };
 }
 
 var ZoneDefinitionType = {
@@ -162,18 +219,20 @@ ZoneDefinitionReply.prototype.updateControl=function(control) {
 	{
 		// Zone definition must be 208 zones plus a reserved 00 sequence
 		console.log("Invalid zone data.");
-		return;
+		return UpdateControlResult(false, "Invalid zone data.");
 	}
 
-	for (var i = 0; i < zoneData.length-2; ++i)
+	for (let i = 0; i < zoneData.length-2; ++i)
 	{
 		var zoneDef = ZoneDefinitionType[zoneData.charAt(i)];
 		if (zoneDef && zoneDef.zoneType != 0) // Don't care about disabled zones
 		{
 			control.zones.push({ zoneId: i+1, zoneDefinition: zoneDef });
-			console.log("Zone " + (i+1) + " defined: " + zoneDef.zoneTypeDescription);
+			//console.log("Zone " + (i+1) + " defined: " + zoneDef.zoneTypeDescription);
 		}
 	}
+
+	return UpdateControlResult(true);
 }
 
 function ZoneDefinitionRequest(){
@@ -238,6 +297,36 @@ var ASCIIStringDefinitionType = {
 	AUDIO_SOURCE_NAME 	: createASCIIStringDefinitionType(19,   1, "Audio Source Name")
 };
 
+function ASCIIStringDefinitionReply(){
+	this.command = ControlMessageType.ASCII_STRING_DEFINITION_REPLY;
+}
+ASCIIStringDefinitionReply.prototype = new ControlMessage();
+ASCIIStringDefinitionReply.prototype.constructor = ASCIIStringDefinitionReply;
+ASCIIStringDefinitionReply.prototype.messageTypeString=function() {
+	return "ASCII String Definition Reply";
+}
+ASCIIStringDefinitionReply.prototype.updateControl=function(control) {
+	var definitionData = this.getPayload();
+	
+	var definitionType = parseInt(definitionData.substring(0,2));
+	var definitionAddress = parseInt(definitionData.substring(2,5));
+
+	var definitionString = definitionData.substring(5, definitionData.length-2).trim(); // Leave off the 00 reserved stuff
+
+	//console.log("Type: " + definitionType + " Addr: " + definitionAddress + " String: " + definitionString);
+
+	if (definitionType === ASCIIStringDefinitionType.ZONE_NAME.typeId) {
+		for (let i = 0; i < control.zones.length; ++i) {
+			if (definitionAddress === control.zones[i].zoneId) {
+				control.zones[i].zoneName = definitionString;
+				return UpdateControlResult(true);
+			}
+		}
+	}
+
+	return UpdateControlResult(false, "Control reply didn't match anything.");
+}
+
 function ASCIIStringDefinitionRequest(stringDefinitionType, definitionAddress){
 	this.command = ControlMessageType.ASCII_STRING_DEFINITION_REQUEST;
 	this.stringDefinitionType = stringDefinitionType;
@@ -256,6 +345,29 @@ ASCIIStringDefinitionRequest.prototype.send=function(socket) {
 	this.setMessage(payload);
 
 	this.sendMessage(socket);
+}
+ASCIIStringDefinitionRequest.prototype.request=function(socket, messageHandler) {
+	var resolvePromise = null;
+	var rejectPromise = null;
+	var handleMessage = null;
+	var receiveHandler = function(obj)
+	{
+		if (obj instanceof ASCIIStringDefinitionReply)
+		{
+			handleMessage(obj);
+		}
+	}
+	handleMessage = function(obj) {
+		messageHandler.unsubscribe(receiveHandler);
+		resolvePromise(obj);
+	}
+	var promise = new Promise(function(resolve, reject) {
+		resolvePromise = resolve;
+		rejectPromise = reject;
+	});
+	messageHandler.subscribe(receiveHandler);
+	this.send(socket);
+	return promise;
 }
 
 function ControlMessageHandler(){
@@ -299,6 +411,11 @@ ControlMessageHandler.prototype.handleMessage = function(rawMessage) {
 		finalMessage = new ZoneDefinitionReply();
 		Object.assign(finalMessage, tempMessage);
 	}
+	else if (command === ControlMessageType.ASCII_STRING_DEFINITION_REPLY)
+	{
+		finalMessage = new ASCIIStringDefinitionReply();
+		Object.assign(finalMessage, tempMessage);
+	}
 
 	if (finalMessage.messageType() === ControlMessageType.UNDEFINED)
 	{
@@ -310,16 +427,11 @@ ControlMessageHandler.prototype.handleMessage = function(rawMessage) {
 	this.fire(finalMessage);
 }
 
-m1Control.controlMessageHandler = new ControlMessageHandler();
-
 var client = new net.Socket();
 client.connect(2101, '10.0.1.55', function() {
 	console.log('Connected');
-	//client.write('Hello, server! Love, Client.');
-
-	var zd = new ZoneDefinitionRequest();
-	//zd.send(client);
-	zd.request(client, m1Control.controlMessageHandler).then(function(obj) { obj.updateControl(m1Control); var sd = new ASCIIStringDefinitionRequest(ASCIIStringDefinitionType.ZONE_NAME, 1);  sd.send(client); });
+	
+	m1Control.initControl(client);
 });
 
 client.on('data', function(data) {
