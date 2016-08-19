@@ -22,6 +22,7 @@ function M1Control(){
 M1Control.prototype.initControl = function(socket) {
 	this.connection = socket;
 	this.controlMessageHandler = new ControlMessageHandler();
+	this.controlMessageHandler.subscribe(this.handleControlEvent);
 	return this.getZoneDefinitions();
 }
 
@@ -31,6 +32,13 @@ M1Control.prototype.updateControl = function(obj) {
 		return Promise.reject("Unknown failure");
 	if (!controlUpdateResult.result) {
 		return Promise.reject(controlUpdateResult.reason);
+	}
+}
+
+M1Control.prototype.handleControlEvent = function(obj) {
+	if (obj instanceof ZoneChangeUpdate) {
+		var zoneChangeInfo = obj.getZoneChangeInfo();
+		console.log("Zone change: " + zoneChangeInfo.zoneId + " Status High: " + zoneChangeInfo.zoneStatusHigh.description);
 	}
 }
 
@@ -76,7 +84,8 @@ var ControlMessageType = {
 	ZONE_DEFINITION_REQUEST : "zd",
 	ZONE_DEFINITION_REPLY : "ZD",
 	ASCII_STRING_DEFINITION_REQUEST : "sd",
-	ASCII_STRING_DEFINITION_REPLY : "SD"
+	ASCII_STRING_DEFINITION_REPLY : "SD",
+	ZONE_CHANGE_UPDATE : "ZC"
 };
 
 function ControlMessage(){
@@ -370,6 +379,58 @@ ASCIIStringDefinitionRequest.prototype.request=function(socket, messageHandler) 
 	return promise;
 }
 
+function createZoneStatus(id, description) {
+	return { id: id, description: description };
+}
+
+var ZoneStatusHigh = {
+	NORMAL : createZoneStatus(0b00, "Normal"),
+	TROUBLE : createZoneStatus(0b01, "Trouble"),
+	VIOLATED : createZoneStatus(0b10, "Violated"),
+	BYPASSED : createZoneStatus(0b11, "Bypassed")
+}
+
+var ZoneStatusLow = {
+	UNCONFIGURED : createZoneStatus(0b00, "Unconfigured"),
+	OPEN : createZoneStatus(0b01, "Open"),
+	EOL : createZoneStatus(0b10, "EOL"),
+	SHORT : createZoneStatus(0b11, "Short")
+}
+
+function ZoneChangeUpdate(){
+	this.command = ControlMessageType.ZONE_CHANGE_UPDATE;
+}
+ZoneChangeUpdate.prototype = new ControlMessage();
+ZoneChangeUpdate.prototype.constructor = ZoneChangeUpdate;
+ZoneChangeUpdate.prototype.messageTypeString=function() {
+	return "Zone Change Update";
+}
+
+ZoneChangeUpdate.prototype.getZoneChangeInfo = function() {
+	var zoneChangeInfo = this.getPayload();
+	var zoneId = parseInt(zoneChangeInfo.substring(0,3));
+	var zoneStatus = parseInt(zoneChangeInfo.substring(3,4), 16); // Hex value
+
+	var lowNibble = zoneStatus & 0b0011; // Mask off the low nibble
+	var highNibble = (zoneStatus & 0b1100) >> 2; // Mask off the high nibble
+
+	var returnVal = { zoneId: zoneId, zoneStatusHigh: null, zoneStatusLow: null };
+
+	var key = null;
+	for (key in ZoneStatusHigh) {
+		if (highNibble === ZoneStatusHigh[key].id) {
+			returnVal.zoneStatusHigh = ZoneStatusHigh[key];
+		}
+	}
+	for (key in ZoneStatusLow) {
+		if (highNibble === ZoneStatusLow[key].id) {
+			returnVal.zoneStatusLow = ZoneStatusLow[key];
+		}
+	}
+
+	return returnVal;
+}
+
 function ControlMessageHandler(){
 	this.listeners = [];
 }
@@ -406,14 +467,16 @@ ControlMessageHandler.prototype.handleMessage = function(rawMessage) {
 	var finalMessage = tempMessage;
 
 	var command = tempMessage.getCommand();
-	if (command === ControlMessageType.ZONE_DEFINITION_REPLY)
-	{
+	if (command === ControlMessageType.ZONE_DEFINITION_REPLY) {
 		finalMessage = new ZoneDefinitionReply();
 		Object.assign(finalMessage, tempMessage);
 	}
-	else if (command === ControlMessageType.ASCII_STRING_DEFINITION_REPLY)
-	{
+	else if (command === ControlMessageType.ASCII_STRING_DEFINITION_REPLY) {
 		finalMessage = new ASCIIStringDefinitionReply();
+		Object.assign(finalMessage, tempMessage);
+	}
+	else if (command === ControlMessageType.ZONE_CHANGE_UPDATE) {
+		finalMessage = new ZoneChangeUpdate();
 		Object.assign(finalMessage, tempMessage);
 	}
 
