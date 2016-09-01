@@ -1,19 +1,39 @@
 "use strict";
 var net = require('net');
 var controlMessages = require('./messages.js');
+var events = require('events');
 
-var m1Control = null;
 function M1Control(){
 	this.zones=[];
 	this.controlMessageHandler = null;
-	this.connection = null;
+	this.connection = new net.Socket();
 }
 
-//M1Control.prototype = new EventEmitter();
-M1Control.prototype.initControl = function(socket) {
-	this.connection = socket;
+M1Control.prototype = new events.EventEmitter();
+M1Control.prototype.connect = function(config) {
+	this.connection.connect(config.port, config.hostname, () => {
+		this.emit('diag','Connected to ' + config.hostname + ':' + config.port);
+		
+		var promise = this.initControl();
+		promise.then((value) => {
+			this.emit('diag',"Control Initialized."); // Success!
+		}, (reason) => {
+			this.emit('diag',"Error: " + reason); // Error!
+		});
+	});
+
+	this.connection.on('data', (data) => {
+		this.controlMessageHandler.handleMessage(data);
+	});
+
+	this.connection.on('close', () => {
+		this.emit('diag','Connection closed');
+	});
+}
+
+M1Control.prototype.initControl = function() {
 	this.controlMessageHandler = new controlMessages.ControlMessageHandler();
-	this.controlMessageHandler.subscribe(this.handleControlEvent);
+	this.controlMessageHandler.subscribe(this.handleControlEvent.bind(this));
 	return this.getZoneDefinitions();
 }
 
@@ -27,17 +47,22 @@ M1Control.prototype.updateControl = function(obj) {
 }
 
 M1Control.prototype.handleControlEvent = function(obj) {
-	if (obj instanceof controlMessages.ZoneChangeUpdate) {
-		var zoneChangeInfo = obj.getZoneChangeInfo();
-		console.log("Zone change: " + zoneChangeInfo.zoneId + " Status High: " + zoneChangeInfo.zoneStatusHigh.description);
+	// Emit to subscribers of any message
+	this.emit('any', obj);
+
+	// Emit to specific message listeners
+	var messageCommand = 'undefined';
+	if (obj.command) {
+		messageCommand = obj.command.toString().toLowerCase();
 	}
+	this.emit(messageCommand, obj);
 }
 
 M1Control.prototype.printZoneDefinitions = function() {
-	console.log("Zone Definitions");
+	this.emit('diag',"Zone Definitions");
 	for (let i = 0; i < this.zones.length; ++i) {
 		let curZone = this.zones[i];
-		console.log("ZoneID: " + curZone.zoneId + " Zone Name: " + curZone.zoneName + " Type: " + curZone.zoneDefinition.zoneTypeDescription);
+		this.emit('diag',"ZoneID: " + curZone.zoneId + " Zone Name: " + curZone.zoneName + " Type: " + curZone.zoneDefinition.zoneTypeDescription);
 	}
 }
 
@@ -68,25 +93,5 @@ M1Control.prototype.getZoneNames = function() {
 	return promiseChain;
 }
 
-m1Control = new M1Control();
-
-
-var client = new net.Socket();
-client.connect(2101, '10.0.1.55', function() {
-	console.log('Connected');
-	
-	var promise = m1Control.initControl(client);
-	promise.then(function(value) {
-	  console.log("Control Initialized."); // Success!
-	}, function(reason) {
-	  console.log(reason); // Error!
-	});
-});
-
-client.on('data', function(data) {
-	m1Control.controlMessageHandler.handleMessage(data);
-});
-
-client.on('close', function() {
-	console.log('Connection closed');
-});
+module.exports.M1Control = M1Control;
+module.exports.Messages = controlMessages;
