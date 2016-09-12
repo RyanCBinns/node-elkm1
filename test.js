@@ -14,6 +14,10 @@ m1Control.on('diag', (logmessage) => {
 	console.log("M1Control: " + logmessage);
 });
 
+m1Control.on('debug', (logmessage) => {
+	console.log("Debug: " + logmessage);
+});
+
 m1Control.on('any', (message) => {
 	if (message instanceof M1Control.Messages.ZoneChangeUpdate) {
 		var zoneChangeInfo = message.getZoneChangeInfo();

@@ -10,13 +10,23 @@ function zeroPad(str, numDigits) {
 	return str;
 }
 
+const DEFAULT_CONTROL_TIMEOUT = 500;
+
+function delay(time) {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, time);
+  });
+}
+
 var ControlMessageType = {
 	UNDEFINED : "undefined",
 	ZONE_DEFINITION_REQUEST : "zd",
 	ZONE_DEFINITION_REPLY : "ZD",
 	ASCII_STRING_DEFINITION_REQUEST : "sd",
 	ASCII_STRING_DEFINITION_REPLY : "SD",
-	ZONE_CHANGE_UPDATE : "ZC"
+	ZONE_CHANGE_UPDATE : "ZC",
+	THERMOSTAT_DATA_REQUEST : "tr",
+	THERMOSTAT_DATA_REPLY : "TR"
 };
 
 function ControlMessage(){
@@ -96,6 +106,9 @@ function ControlRequest() {
 
 ControlRequest.prototype = new ControlMessage();
 ControlRequest.prototype.constructor = ControlRequest;
+ControlRequest.prototype.getResponseType=function() {
+	return this.responseType;
+}
 ControlRequest.prototype.sendRawMessage=function(control) {
 	if (!this.valid)
 	{
@@ -107,18 +120,26 @@ ControlRequest.prototype.sendRawMessage=function(control) {
 }
 
 ControlRequest.prototype.request=function(control) {
+	var responseHandler = null;
+	var replyMessageType = this.getResponseType();
 	var promise = new Promise((resolve, reject) => {
-		let replyMessageType = this.command.toString().toUpperCase();
-		control.once(replyMessageType, (replyMessage) => {
+		responseHandler = (replyMessage) => {
 			resolve(replyMessage);
-		});
+		};
+		control.once(replyMessageType, responseHandler);
 		this.sendToControl(control);
 	});
-	return promise;
+
+	return Promise.race([promise, delay(DEFAULT_CONTROL_TIMEOUT).then(() => {
+		control.removeListener(replyMessageType, responseHandler);
+	    return Promise.reject("Operation timed out");
+	  })]);
 }
 
-function UpdateControlResult(result, reason) {
-	return { result: result, reason: reason };
+function ControlDataResult(result, reason, data) {
+	this.result = result;
+	this.reason = reason;
+	this.controlData = data;
 }
 
 var ZoneDefinitionType = {
@@ -169,14 +190,13 @@ ZoneDefinitionReply.prototype.constructor = ZoneDefinitionReply;
 ZoneDefinitionReply.prototype.messageTypeString=function() {
 	return "Zone Definition Reply";
 }
-ZoneDefinitionReply.prototype.updateControl=function(control) {
-	control.zones = []; // Clear
+ZoneDefinitionReply.prototype.getControlData=function() {
+	var zones = [];
 	var zoneData = this.getPayload();
 	if (zoneData.length != 210)
 	{
 		// Zone definition must be 208 zones plus a reserved 00 sequence
-		control.emit('diag', "Invalid zone data.");
-		return UpdateControlResult(false, "Invalid zone data.");
+		return new ControlDataResult(false, "Invalid zone data.");
 	}
 
 	for (let i = 0; i < zoneData.length-2; ++i)
@@ -184,16 +204,16 @@ ZoneDefinitionReply.prototype.updateControl=function(control) {
 		var zoneDef = ZoneDefinitionType[zoneData.charAt(i)];
 		if (zoneDef && zoneDef.zoneType != 0) // Don't care about disabled zones
 		{
-			control.zones.push({ zoneId: i+1, zoneDefinition: zoneDef });
-			//console.log("Zone " + (i+1) + " defined: " + zoneDef.zoneTypeDescription);
+			zones.push({ zoneId: i+1, zoneDefinition: zoneDef });
 		}
 	}
 
-	return UpdateControlResult(true);
+	return new ControlDataResult(true, "Success.", zones);
 }
 
 function ZoneDefinitionRequest(){
 	this.command = ControlMessageType.ZONE_DEFINITION_REQUEST;
+	this.responseType = ControlMessageType.ZONE_DEFINITION_REPLY;
 }
 ZoneDefinitionRequest.prototype = new ControlRequest();
 ZoneDefinitionRequest.prototype.constructor = ZoneDefinitionRequest;
@@ -240,7 +260,7 @@ ASCIIStringDefinitionReply.prototype.constructor = ASCIIStringDefinitionReply;
 ASCIIStringDefinitionReply.prototype.messageTypeString=function() {
 	return "ASCII String Definition Reply";
 }
-ASCIIStringDefinitionReply.prototype.updateControl=function(control) {
+ASCIIStringDefinitionReply.prototype.getControlData=function() {
 	var definitionData = this.getPayload();
 	
 	var definitionType = parseInt(definitionData.substring(0,2));
@@ -248,22 +268,18 @@ ASCIIStringDefinitionReply.prototype.updateControl=function(control) {
 
 	var definitionString = definitionData.substring(5, definitionData.length-2).trim(); // Leave off the 00 reserved stuff
 
-	//console.log("Type: " + definitionType + " Addr: " + definitionAddress + " String: " + definitionString);
+	var stringData = {
+		stringType: definitionType,
+		stringAddress: definitionAddress,
+		stringValue: definitionString
+	};
 
-	if (definitionType === ASCIIStringDefinitionType.ZONE_NAME.typeId) {
-		for (let i = 0; i < control.zones.length; ++i) {
-			if (definitionAddress === control.zones[i].zoneId) {
-				control.zones[i].zoneName = definitionString;
-				return UpdateControlResult(true);
-			}
-		}
-	}
-
-	return UpdateControlResult(false, "Control reply didn't match anything.");
+	return new ControlDataResult(true, "Success.", stringData);
 }
 
 function ASCIIStringDefinitionRequest(stringDefinitionType, definitionAddress){
 	this.command = ControlMessageType.ASCII_STRING_DEFINITION_REQUEST;
+	this.responseType = ControlMessageType.ASCII_STRING_DEFINITION_REPLY;
 	this.stringDefinitionType = stringDefinitionType;
 	this.definitionAddress = definitionAddress;
 }
@@ -331,11 +347,69 @@ ZoneChangeUpdate.prototype.getZoneChangeInfo = function() {
 	return returnVal;
 }
 
+function CreateThermostatData(id, enabled, mode, hold, fan, currentTemp, heatSetPoint, coolSetPoint, humidity) {
+	return {
+		thermostatId: id,
+		enabled: !!enabled,
+		mode: parseInt(mode),
+		hold: !!hold,
+		fan: !!fan,
+		currentTemp: currentTemp,
+		heatSetPoint: heatSetPoint,
+		coolSetPoint: coolSetPoint,
+		humidity: humidity
+	};
+}
+
+function ThermostatDataRequest(thermostatId){
+	this.command = ControlMessageType.THERMOSTAT_DATA_REQUEST;
+	this.responseType = ControlMessageType.THERMOSTAT_DATA_REPLY;
+	this.thermostatId = thermostatId;
+}
+ThermostatDataRequest.prototype = new ControlRequest();
+ThermostatDataRequest.prototype.constructor = ThermostatDataRequest;
+ThermostatDataRequest.prototype.sendToControl=function(control) {
+	var thermostatAddr = zeroPad(this.thermostatId.toString(), 2);
+
+	var payload = this.command + thermostatAddr + "00";
+	this.setMessage(payload);
+
+	this.sendRawMessage(control);
+}
+
+function ThermostatDataReply(){
+	this.command = ControlMessageType.THERMOSTAT_DATA_REPLY;
+}
+ThermostatDataReply.prototype = new ControlMessage();
+ThermostatDataReply.prototype.constructor = ThermostatDataReply;
+ThermostatDataReply.prototype.messageTypeString=function() {
+	return "Thermostat Data Reply";
+}
+ThermostatDataReply.prototype.getControlData=function() {
+	var rawThermostatData = this.getPayload();
+	
+	var thermostatId = parseInt(rawThermostatData.substring(0,2));
+	var thermostatMode = parseInt(rawThermostatData.substring(2,3));
+	var thermostatHold = !(parseInt(rawThermostatData.substring(3,4)) == 0);
+	var thermostatFan = !(parseInt(rawThermostatData.substring(4,5)) == 0);
+	var thermostatCurrentTemp = parseInt(rawThermostatData.substring(5,7));
+	var thermostatHeatSetpoint = parseInt(rawThermostatData.substring(7,9));
+	var thermostatCoolSetpoint = parseInt(rawThermostatData.substring(9,11));
+	var thermostatHumidity = parseInt(rawThermostatData.substring(11,13));
+
+	var thermostatData = CreateThermostatData(thermostatId, (thermostatCurrentTemp != 0), thermostatMode, 
+											  thermostatHold, thermostatFan, thermostatCurrentTemp, 
+											  thermostatHeatSetpoint, thermostatCoolSetpoint, thermostatHumidity);
+
+	return new ControlDataResult(true, "Success.", thermostatData);
+}
+
 // Only include types that the control sends back to us (no requests)
 var ControlMessageConstructors = { };
 ControlMessageConstructors[ControlMessageType.ZONE_DEFINITION_REPLY.toString()] = ZoneDefinitionReply;
 ControlMessageConstructors[ControlMessageType.ASCII_STRING_DEFINITION_REPLY.toString()] = ASCIIStringDefinitionReply;
 ControlMessageConstructors[ControlMessageType.ZONE_CHANGE_UPDATE.toString()] = ZoneChangeUpdate;
+ControlMessageConstructors[ControlMessageType.THERMOSTAT_DATA_REPLY.toString()] = ThermostatDataReply;
 
 function ParseControlMessage(rawMessage) {
 	var tempMessage = new ControlMessage();
@@ -366,10 +440,16 @@ module.exports = {
 	ZoneStatusLow: ZoneStatusLow,
 
 	// 'Types'
+	ControlDataResult: ControlDataResult,
 	ZoneChangeUpdate: ZoneChangeUpdate,
 	ZoneDefinitionRequest: ZoneDefinitionRequest,
+	ZoneDefinitionReply: ZoneDefinitionReply,
 	ASCIIStringDefinitionRequest: ASCIIStringDefinitionRequest,
+	ASCIIStringDefinitionReply: ASCIIStringDefinitionReply,
+	ThermostatDataRequest: ThermostatDataRequest,
+	ThermostatDataReply: ThermostatDataReply,
 
 	// Factories
-	ParseControlMessage: ParseControlMessage
+	ParseControlMessage: ParseControlMessage,
+	CreateThermostatData: CreateThermostatData
 };
