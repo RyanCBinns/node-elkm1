@@ -35,12 +35,20 @@ M1Control.prototype.connect = function(config) {
 }
 
 M1Control.prototype.initControl = function() {
-	// Init thermostats
-	for (let i = 0; i < 16; ++i) {
-		this.thermostats[i] = controlMessages.CreateThermostatData(i+1);
+	var promiseChain = null;
+	this.controlInitSequence.forEach((controlInitializer) => {
+		if (!promiseChain) {
+			promiseChain = controlInitializer.bind(this)();
+		}
+		else {
+			promiseChain.then(controlInitializer.bind(this));
+		}
+	});
+	if (!promiseChain) {
+		promiseChain = Promise.resolve(true); // Maybe we had no init items?
 	}
 
-	return this.getZoneDefinitions().then(this.getThermostatNames.bind(this)).then(this.getThermostatTemperatures.bind(this));
+	return promiseChain;
 }
 
 M1Control.prototype.updateControl = function(obj) {
@@ -69,48 +77,61 @@ M1Control.prototype.updateControl = function(obj) {
 	}
 
 	if (obj instanceof controlMessages.ZoneDefinitionReply) {
-		this.zones = controlDataResult.controlData;
-		return Promise.resolve(true); // Keep processing
+		return this.updateControlZoneDefinitions(obj, controlDataResult.controlData);
 	}
 	else if (obj instanceof controlMessages.ASCIIStringDefinitionReply) {
-		if (controlDataResult.controlData.stringAddress === 0) {
-			//this.emit('diag', "Abort string processing.");
-			return Promise.resolve(false); // Stop processing strings
-		}
-
-		if (controlDataResult.controlData.stringType === controlMessages.ASCIIStringDefinitionType.ZONE_NAME.typeId) {
-			for (let i = 0; i < this.zones.length; ++i) {
-				if (controlDataResult.controlData.stringAddress === this.zones[i].zoneId) {
-					this.zones[i].zoneName = controlDataResult.controlData.stringValue;
-					return Promise.resolve(true); // Keep processing
-				}
-			}
-		}
-		else if (controlDataResult.controlData.stringType === controlMessages.ASCIIStringDefinitionType.THERMOSTAT_NAME.typeId) {
-			for (let i = 0; i < this.thermostats.length; ++i) {
-				if (controlDataResult.controlData.stringAddress === this.thermostats[i].thermostatId) {
-					this.thermostats[i].thermostatName = controlDataResult.controlData.stringValue;
-					this.thermostats[i].enabled = true;
-					this.emit('diag', "Thermostat: " + this.thermostats[i].thermostatId + " - " + this.thermostats[i].thermostatName);
-					return Promise.resolve(true); // Keep processing
-				}
-			}
-		}
+		return this.updateControlASCIIStringData(obj, controlDataResult.controlData);
 	}
 	else if (obj instanceof controlMessages.ThermostatDataReply) {
-		for (let i = 0; i < this.thermostats.length; ++i) {
-			if (controlDataResult.controlData.thermostatId === this.thermostats[i].thermostatId) {
-				let thermostatName = this.thermostats[i].thermostatName;
-				this.thermostats[i] = controlDataResult.controlData;
-				this.thermostats[i].thermostatName = thermostatName;
-				this.emit('diag', "Thermostat Data: " + this.thermostats[i].thermostatId + " - " + this.thermostats[i].currentTemp + " degF  Mode: " + this.thermostats[i].mode.toString());
-				return Promise.resolve(true); // Keep processing
-			}
-		}
-		return Promise.resolve(true);
+		return this.updateControlThermostatData(obj, controlDataResult.controlData);
 	}
 
 	// Default
+	return Promise.resolve(true); // Keep processing
+}
+
+M1Control.prototype.updateControlZoneDefinitions = function(obj, controlData) {
+	this.zones = controlData;
+	return Promise.resolve(true); // Keep processing
+}
+
+M1Control.prototype.updateControlASCIIStringData = function(obj, controlData) {
+	if (controlData.stringAddress === 0) {
+		//this.emit('diag', "Abort string processing.");
+		return Promise.resolve(false); // Stop processing strings
+	}
+
+	if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.ZONE_NAME.typeId) {
+		for (let i = 0; i < this.zones.length; ++i) {
+			if (controlData.stringAddress === this.zones[i].zoneId) {
+				this.zones[i].zoneName = controlData.stringValue;
+				return Promise.resolve(true); // Keep processing
+			}
+		}
+	}
+	else if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.THERMOSTAT_NAME.typeId) {
+		for (let i = 0; i < this.thermostats.length; ++i) {
+			if (controlData.stringAddress === this.thermostats[i].thermostatId) {
+				this.thermostats[i].thermostatName = controlData.stringValue;
+				this.thermostats[i].enabled = true;
+				this.emit('diag', "Thermostat: " + this.thermostats[i].thermostatId + " - " + this.thermostats[i].thermostatName);
+				return Promise.resolve(true); // Keep processing
+			}
+		}
+	}
+	return Promise.resolve(true); // Keep processing
+}
+
+M1Control.prototype.updateControlThermostatData = function(obj, controlData) {
+	for (let i = 0; i < this.thermostats.length; ++i) {
+		if (controlData.thermostatId === this.thermostats[i].thermostatId) {
+			let thermostatName = this.thermostats[i].thermostatName;
+			this.thermostats[i] = controlData;
+			this.thermostats[i].thermostatName = thermostatName;
+			this.emit('diag', "Thermostat Data: " + this.thermostats[i].thermostatId + " - " + this.thermostats[i].currentTemp + " degF  Mode: " + this.thermostats[i].mode.toString());
+			return Promise.resolve(true); // Keep processing
+		}
+	}
 	return Promise.resolve(true); // Keep processing
 }
 
@@ -206,6 +227,15 @@ M1Control.prototype.getZoneNames = function() {
 	return promiseChain;
 }
 
+M1Control.prototype.getThermostatDefinitions = function() {
+	// Init thermostats
+	for (let i = 0; i < 16; ++i) {
+		this.thermostats[i] = controlMessages.CreateThermostatData(i+1);
+	}
+
+	return this.getThermostatNames().then(this.getThermostatTemperatures.bind(this));
+}
+
 M1Control.prototype.getThermostatNames = function() {
 	var promiseChain = null;
 	var updateThisControl = this.updateControl.bind(this);
@@ -275,6 +305,10 @@ M1Control.prototype.getThermostatTemperatures = function() {
 
 	return promiseChain;
 }
+
+// Defines the sequence of control init tasks.  These tasks should all return a Promise.
+M1Control.prototype.controlInitSequence = [M1Control.prototype.getZoneDefinitions,
+										   M1Control.prototype.getThermostatDefinitions];
 
 module.exports.M1Control = M1Control;
 module.exports.Messages = controlMessages;
