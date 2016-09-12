@@ -6,6 +6,7 @@ var events = require('events');
 function M1Control(){
 	this.zones=[];
 	this.thermostats=[];
+	this.lights=[];
 	this.connection = new net.Socket();
 	this.connected = false;
 }
@@ -41,7 +42,7 @@ M1Control.prototype.initControl = function() {
 			promiseChain = controlInitializer.bind(this)();
 		}
 		else {
-			promiseChain.then(controlInitializer.bind(this));
+			promiseChain = promiseChain.then(controlInitializer.bind(this));
 		}
 	});
 	if (!promiseChain) {
@@ -56,8 +57,8 @@ M1Control.prototype.updateControl = function(obj) {
 		return Promise.resolve(false); // Stop processing
 	}
 
-	// Don't process messages twice
-	if (!!obj.processed) {
+	// Don't process junk, don't process messages twice
+	if (!(obj instanceof Object) || !!obj.processed) {
 		return Promise.resolve(true); // Keep going
 	}
 	obj.processed = true;
@@ -115,6 +116,16 @@ M1Control.prototype.updateControlASCIIStringData = function(obj, controlData) {
 				this.thermostats[i].thermostatName = controlData.stringValue;
 				this.thermostats[i].enabled = true;
 				this.emit('diag', "Thermostat: " + this.thermostats[i].thermostatId + " - " + this.thermostats[i].thermostatName);
+				return Promise.resolve(true); // Keep processing
+			}
+		}
+	}
+	else if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.LIGHT_NAME.typeId) {
+		for (let i = 0; i < this.lights.length; ++i) {
+			if (controlData.stringAddress === this.lights[i].lightId) {
+				this.lights[i].lightName = controlData.stringValue;
+				this.lights[i].enabled = true;
+				this.emit('diag', "Light: " + this.lights[i].lightId + " - " + this.lights[i].lightName);
 				return Promise.resolve(true); // Keep processing
 			}
 		}
@@ -248,8 +259,14 @@ M1Control.prototype.getThermostatNames = function() {
 			}
 			else {
 				promiseChain = promiseChain.then((keepProcessing) => { 
-					if (keepProcessing) { 
-						return sd.request(this); 
+					if (keepProcessing) {
+						// It's possible for there to be gaps in the list that the control will skip, so don't waste time if we've already got the name
+						if (!this.thermostats[i].thermostatName) {
+							return sd.request(this); 
+						}
+						else {
+							return Promise.resolve(true); // Skip
+						}
 					}
 					else
 					{
@@ -306,9 +323,57 @@ M1Control.prototype.getThermostatTemperatures = function() {
 	return promiseChain;
 }
 
+M1Control.prototype.getLightDefinitions = function() {
+	// There are 256 possible lights
+	for (let i = 0; i < 256; ++i) {
+		this.lights[i] = { lightId: i+1, enabled: false };
+	}
+	return this.getLightNames();
+}
+
+M1Control.prototype.getLightNames = function() {
+	var promiseChain = null;
+	var updateThisControl = this.updateControl.bind(this);
+	// There are 256 possible lights
+	for (let i = 0; i < this.lights.length; ++i) {
+		if (!this.lights[i].lightName) {
+			let sd = new controlMessages.ASCIIStringDefinitionRequest(controlMessages.ASCIIStringDefinitionType.LIGHT_NAME, this.lights[i].lightId);
+			if (!promiseChain) {
+				promiseChain = sd.request(this).then(updateThisControl);
+			}
+			else {
+				promiseChain = promiseChain.then((keepProcessing) => { 
+					if (keepProcessing) {
+						// It's possible for there to be gaps in the list that the control will skip, so don't waste time if we've already got the name
+						if (!this.lights[i].lightName) {
+							return sd.request(this); 
+						}
+						else {
+							return Promise.resolve(true); // Skip
+						}
+					}
+					else
+					{
+						return Promise.resolve(false);
+					}
+				}).then(updateThisControl);
+			}
+		}
+	}
+	if (!promiseChain) {
+		promiseChain = Promise.resolve(true); // Just keep going, we didn't find any enabled thermostats
+	}
+
+	promiseChain = promiseChain.catch((reason) => {
+		this.emit('diag', "Failed to get light names: " + reason);
+	});
+	return promiseChain;
+}
+
 // Defines the sequence of control init tasks.  These tasks should all return a Promise.
 M1Control.prototype.controlInitSequence = [M1Control.prototype.getZoneDefinitions,
-										   M1Control.prototype.getThermostatDefinitions];
+										   M1Control.prototype.getThermostatDefinitions,
+										   M1Control.prototype.getLightDefinitions];
 
 module.exports.M1Control = M1Control;
 module.exports.Messages = controlMessages;
