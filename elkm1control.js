@@ -133,22 +133,22 @@ M1Control.prototype.updateControlASCIIStringData = function(obj, controlData) {
 	return Promise.resolve(true); // Keep processing
 }
 
-M1Control.prototype.getControlStrings = function(stringType, items, getItemId, updateIf) {
+M1Control.prototype.createControlRequestChain = function(items, processIf, getRequest, handleError) {
 	var promiseChain = null;
 	var updateThisControl = this.updateControl.bind(this);
 	// Check all the individual items
 	for (let i = 0; i < items.length; ++i) {
-		if (updateIf(items[i])) {
-			let sd = new controlMessages.ASCIIStringDefinitionRequest(stringType, getItemId(items[i]));
+		if (processIf(items[i])) {
+			let controlRequest = getRequest(items[i]);
 			if (!promiseChain) {
-				promiseChain = sd.request(this).then(updateThisControl);
+				promiseChain = controlRequest.request(this).then(updateThisControl);
 			}
 			else {
 				promiseChain = promiseChain.then((keepProcessing) => { 
 					if (keepProcessing) {
-						// It's possible for there to be gaps in the list that the control will skip, so don't waste time if we've already got the name
-						if (updateIf(items[i])) {
-							return sd.request(this); 
+						// It's possible for there to be gaps in the list that the control will skip, so don't waste time if we no longer need to process it
+						if (processIf(items[i])) {
+							return controlRequest.request(this); 
 						}
 						else {
 							return Promise.resolve(true); // Skip
@@ -166,10 +166,21 @@ M1Control.prototype.getControlStrings = function(stringType, items, getItemId, u
 		promiseChain = Promise.resolve(true); // Just keep going, we didn't find any enabled thermostats
 	}
 
-	promiseChain = promiseChain.catch((reason) => {
-		this.emit('diag', "Warning: Failed to get control names of type: " + stringType.stringDefinitionTypeDescription + " Reason: " + reason);
-	});
+	if (handleError) {
+		promiseChain = promiseChain.catch(handleError);
+	}
 	return promiseChain;
+}
+
+M1Control.prototype.updateControlStrings = function(stringType, items, getItemId, updateIf) {
+	return this.createControlRequestChain(items, 
+										updateIf, 
+										(item) => { 
+											return new controlMessages.ASCIIStringDefinitionRequest(stringType, getItemId(item)); 
+										}, 
+										(reason) => { 
+											this.emit('diag', "Warning: Failed to get control names of type: " + stringType.stringDefinitionTypeDescription + " Reason: " + reason); 
+										});
 }
 
 M1Control.prototype.updateControlThermostatData = function(obj, controlData) {
@@ -237,16 +248,16 @@ M1Control.prototype.printZoneDefinitions = function() {
 	}
 }
 
-M1Control.prototype.getZoneDefinitions = function() {
+M1Control.prototype.updateZoneDefinitions = function() {
 	var zd = new controlMessages.ZoneDefinitionRequest();
 	var updateThisControl = this.updateControl.bind(this);
-	var getThisZoneNames = this.getZoneNames.bind(this);
+	var updateThisZoneNames = this.updateZoneNames.bind(this);
 	var printThisDefinitions = this.printZoneDefinitions.bind(this);
-	return zd.request(this).then(updateThisControl).then(getThisZoneNames).then(printThisDefinitions);
+	return zd.request(this).then(updateThisControl).then(updateThisZoneNames).then(printThisDefinitions);
 }
 
-M1Control.prototype.getZoneNames = function() {
-	return this.getControlStrings(controlMessages.ASCIIStringDefinitionType.ZONE_NAME, 
+M1Control.prototype.updateZoneNames = function() {
+	return this.updateControlStrings(controlMessages.ASCIIStringDefinitionType.ZONE_NAME, 
 								  	this.zones, 
 								  	(item) => { 
 								  		return item.zoneId; 
@@ -256,17 +267,17 @@ M1Control.prototype.getZoneNames = function() {
 									});
 }
 
-M1Control.prototype.getThermostatDefinitions = function() {
+M1Control.prototype.updateThermostatDefinitions = function() {
 	// Init thermostats
 	for (let i = 0; i < 16; ++i) {
 		this.thermostats[i] = controlMessages.CreateThermostatData(i+1);
 	}
 
-	return this.getThermostatNames().then(this.getThermostatTemperatures.bind(this));
+	return this.updateThermostatNames().then(this.updateThermostatTemperatures.bind(this));
 }
 
-M1Control.prototype.getThermostatNames = function() {
-	return this.getControlStrings(controlMessages.ASCIIStringDefinitionType.THERMOSTAT_NAME, 
+M1Control.prototype.updateThermostatNames = function() {
+	return this.updateControlStrings(controlMessages.ASCIIStringDefinitionType.THERMOSTAT_NAME, 
 								  	this.thermostats, 
 								  	(item) => { 
 								  		return item.thermostatId; 
@@ -276,53 +287,29 @@ M1Control.prototype.getThermostatNames = function() {
 									});
 }
 
-M1Control.prototype.getThermostatTemperatures = function() {
-	var promiseChain = null;
-	var updateThisControl = this.updateControl.bind(this);
-	// There are only 16 possible thermostats
-	for (let i = 0; i < this.thermostats.length; ++i) {
-		if (!this.thermostats[i].enabled) {
-			continue;
-		}
-
-		let tr = new controlMessages.ThermostatDataRequest(this.thermostats[i].thermostatId);
-		if (!promiseChain) {
-			promiseChain = tr.request(this).then(updateThisControl);
-		}
-		else {
-			promiseChain = promiseChain.then((keepProcessing) => { 
-				if (keepProcessing) { 
-					return tr.request(this); 
-				}
-				else
-				{
-					return Promise.resolve(false);
-				}
-			}).then(updateThisControl);
-		}
-	}
-
-	if (!promiseChain) {
-		promiseChain = Promise.resolve(true); // Just keep going, we didn't find any enabled thermostats
-	}
-
-	promiseChain = promiseChain.catch((reason) => {
-		this.emit('diag', "Failed to get temperature data: " + reason);
-	});
-
-	return promiseChain;
+M1Control.prototype.updateThermostatTemperatures = function() {
+	return this.createControlRequestChain(this.thermostats, 
+									(item) => {
+										return item.enabled;
+									}, 
+									(item) => { 
+										return new controlMessages.ThermostatDataRequest(item.thermostatId); 
+									}, 
+									(reason) => { 
+										this.emit('diag', "Failed to get temperature data: " + reason); 
+									});
 }
 
-M1Control.prototype.getLightDefinitions = function() {
+M1Control.prototype.updateLightDefinitions = function() {
 	// There are 256 possible lights
 	for (let i = 0; i < 256; ++i) {
 		this.lights[i] = { lightId: i+1, enabled: false };
 	}
-	return this.getLightNames();
+	return this.updateLightNames();
 }
 
-M1Control.prototype.getLightNames = function() {
-	return this.getControlStrings(controlMessages.ASCIIStringDefinitionType.LIGHT_NAME, 
+M1Control.prototype.updateLightNames = function() {
+	return this.updateControlStrings(controlMessages.ASCIIStringDefinitionType.LIGHT_NAME, 
 							  	this.lights, 
 							  	(item) => { 
 							  		return item.lightId; 
@@ -333,9 +320,9 @@ M1Control.prototype.getLightNames = function() {
 }
 
 // Defines the sequence of control init tasks.  These tasks should all return a Promise.
-M1Control.prototype.controlInitSequence = [M1Control.prototype.getZoneDefinitions,
-										   M1Control.prototype.getThermostatDefinitions,
-										   M1Control.prototype.getLightDefinitions];
+M1Control.prototype.controlInitSequence = [M1Control.prototype.updateZoneDefinitions,
+										   M1Control.prototype.updateThermostatDefinitions,
+										   M1Control.prototype.updateLightDefinitions];
 
 module.exports.M1Control = M1Control;
 module.exports.Messages = controlMessages;
