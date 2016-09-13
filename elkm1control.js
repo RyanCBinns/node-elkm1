@@ -133,6 +133,45 @@ M1Control.prototype.updateControlASCIIStringData = function(obj, controlData) {
 	return Promise.resolve(true); // Keep processing
 }
 
+M1Control.prototype.getControlStrings = function(stringType, items, getItemId, updateIf) {
+	var promiseChain = null;
+	var updateThisControl = this.updateControl.bind(this);
+	// Check all the individual items
+	for (let i = 0; i < items.length; ++i) {
+		if (updateIf(items[i])) {
+			let sd = new controlMessages.ASCIIStringDefinitionRequest(stringType, getItemId(items[i]));
+			if (!promiseChain) {
+				promiseChain = sd.request(this).then(updateThisControl);
+			}
+			else {
+				promiseChain = promiseChain.then((keepProcessing) => { 
+					if (keepProcessing) {
+						// It's possible for there to be gaps in the list that the control will skip, so don't waste time if we've already got the name
+						if (updateIf(items[i])) {
+							return sd.request(this); 
+						}
+						else {
+							return Promise.resolve(true); // Skip
+						}
+					}
+					else
+					{
+						return Promise.resolve(false);
+					}
+				}).then(updateThisControl);
+			}
+		}
+	}
+	if (!promiseChain) {
+		promiseChain = Promise.resolve(true); // Just keep going, we didn't find any enabled thermostats
+	}
+
+	promiseChain = promiseChain.catch((reason) => {
+		this.emit('diag', "Warning: Failed to get control names of type: " + stringType.stringDefinitionTypeDescription + " Reason: " + reason);
+	});
+	return promiseChain;
+}
+
 M1Control.prototype.updateControlThermostatData = function(obj, controlData) {
 	for (let i = 0; i < this.thermostats.length; ++i) {
 		if (controlData.thermostatId === this.thermostats[i].thermostatId) {
@@ -207,35 +246,14 @@ M1Control.prototype.getZoneDefinitions = function() {
 }
 
 M1Control.prototype.getZoneNames = function() {
-	var promiseChain = null;
-	var updateThisControl = this.updateControl.bind(this);
-	for (let i = 0; i < this.zones.length; ++i) {
-		if (!this.zones[i].zoneName) {
-			let sd = new controlMessages.ASCIIStringDefinitionRequest(controlMessages.ASCIIStringDefinitionType.ZONE_NAME, this.zones[i].zoneId);
-			if (!promiseChain) {
-				promiseChain = sd.request(this).then(updateThisControl);
-			}
-			else {
-				promiseChain = promiseChain.then((keepProcessing) => {
-					if (keepProcessing) { 
-						return sd.request(this); 
-					}
-					else
-					{
-						return Promise.resolve(false);
-					}
-				}).then(updateThisControl);
-			}
-		}
-	}
-	if (!promiseChain) {
-		promiseChain = Promise.resolve(true); // Just keep going, we didn't find any zones without names
-	}
-
-	promiseChain = promiseChain.catch((reason) => {
-		this.emit('diag', "Failed to get zone names: " + reason);
-	});
-	return promiseChain;
+	return this.getControlStrings(controlMessages.ASCIIStringDefinitionType.ZONE_NAME, 
+								  	this.zones, 
+								  	(item) => { 
+								  		return item.zoneId; 
+								  	}, 
+								  	(item) => {
+								  		return !item.zoneName;
+									});
 }
 
 M1Control.prototype.getThermostatDefinitions = function() {
@@ -248,42 +266,14 @@ M1Control.prototype.getThermostatDefinitions = function() {
 }
 
 M1Control.prototype.getThermostatNames = function() {
-	var promiseChain = null;
-	var updateThisControl = this.updateControl.bind(this);
-	// There are only 16 possible thermostats
-	for (let i = 0; i < this.thermostats.length; ++i) {
-		if (!this.thermostats[i].thermostatName) {
-			let sd = new controlMessages.ASCIIStringDefinitionRequest(controlMessages.ASCIIStringDefinitionType.THERMOSTAT_NAME, this.thermostats[i].thermostatId);
-			if (!promiseChain) {
-				promiseChain = sd.request(this).then(updateThisControl);
-			}
-			else {
-				promiseChain = promiseChain.then((keepProcessing) => { 
-					if (keepProcessing) {
-						// It's possible for there to be gaps in the list that the control will skip, so don't waste time if we've already got the name
-						if (!this.thermostats[i].thermostatName) {
-							return sd.request(this); 
-						}
-						else {
-							return Promise.resolve(true); // Skip
-						}
-					}
-					else
-					{
-						return Promise.resolve(false);
-					}
-				}).then(updateThisControl);
-			}
-		}
-	}
-	if (!promiseChain) {
-		promiseChain = Promise.resolve(true); // Just keep going, we didn't find any enabled thermostats
-	}
-
-	promiseChain = promiseChain.catch((reason) => {
-		this.emit('diag', "Failed to get thermostat names: " + reason);
-	});
-	return promiseChain;
+	return this.getControlStrings(controlMessages.ASCIIStringDefinitionType.THERMOSTAT_NAME, 
+								  	this.thermostats, 
+								  	(item) => { 
+								  		return item.thermostatId; 
+								  	}, 
+								  	(item) => {
+								  		return !item.thermostatName;
+									});
 }
 
 M1Control.prototype.getThermostatTemperatures = function() {
@@ -332,42 +322,14 @@ M1Control.prototype.getLightDefinitions = function() {
 }
 
 M1Control.prototype.getLightNames = function() {
-	var promiseChain = null;
-	var updateThisControl = this.updateControl.bind(this);
-	// There are 256 possible lights
-	for (let i = 0; i < this.lights.length; ++i) {
-		if (!this.lights[i].lightName) {
-			let sd = new controlMessages.ASCIIStringDefinitionRequest(controlMessages.ASCIIStringDefinitionType.LIGHT_NAME, this.lights[i].lightId);
-			if (!promiseChain) {
-				promiseChain = sd.request(this).then(updateThisControl);
-			}
-			else {
-				promiseChain = promiseChain.then((keepProcessing) => { 
-					if (keepProcessing) {
-						// It's possible for there to be gaps in the list that the control will skip, so don't waste time if we've already got the name
-						if (!this.lights[i].lightName) {
-							return sd.request(this); 
-						}
-						else {
-							return Promise.resolve(true); // Skip
-						}
-					}
-					else
-					{
-						return Promise.resolve(false);
-					}
-				}).then(updateThisControl);
-			}
-		}
-	}
-	if (!promiseChain) {
-		promiseChain = Promise.resolve(true); // Just keep going, we didn't find any enabled thermostats
-	}
-
-	promiseChain = promiseChain.catch((reason) => {
-		this.emit('diag', "Failed to get light names: " + reason);
-	});
-	return promiseChain;
+	return this.getControlStrings(controlMessages.ASCIIStringDefinitionType.LIGHT_NAME, 
+							  	this.lights, 
+							  	(item) => { 
+							  		return item.lightId; 
+							  	}, 
+							  	(item) => {
+							  		return !item.lightName;
+								});
 }
 
 // Defines the sequence of control init tasks.  These tasks should all return a Promise.
