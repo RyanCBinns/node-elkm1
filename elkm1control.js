@@ -52,7 +52,7 @@ M1Control.prototype.initControl = function() {
 	return promiseChain;
 }
 
-M1Control.prototype.updateControl = function(obj) {
+M1Control.prototype.updateControl = function(messageHandler, obj) {
 	if (!obj) {
 		return Promise.resolve(false); // Stop processing
 	}
@@ -77,65 +77,23 @@ M1Control.prototype.updateControl = function(obj) {
 		return Promise.reject(controlDataResult.reason);
 	}
 
-	if (obj instanceof controlMessages.ZoneDefinitionReply) {
-		return this.updateControlZoneDefinitions(obj, controlDataResult.controlData);
+	// Have we specified a custom message handler?
+	if (messageHandler) {
+		return Promise.resolve(messageHandler(controlDataResult.controlData));
 	}
-	else if (obj instanceof controlMessages.ASCIIStringDefinitionReply) {
-		return this.updateControlASCIIStringData(obj, controlDataResult.controlData);
-	}
-	else if (obj instanceof controlMessages.ThermostatDataReply) {
-		return this.updateControlThermostatData(obj, controlDataResult.controlData);
+
+	// Default handlers  (Mostly unsolicited events)
+	if (obj instanceof controlMessages.ThermostatDataReply) {
+		return Promise.resolve(this.updateThermostatTemperature(controlDataResult.controlData));
 	}
 
 	// Default
 	return Promise.resolve(true); // Keep processing
 }
 
-M1Control.prototype.updateControlZoneDefinitions = function(obj, controlData) {
-	this.zones = controlData;
-	return Promise.resolve(true); // Keep processing
-}
-
-M1Control.prototype.updateControlASCIIStringData = function(obj, controlData) {
-	if (controlData.stringAddress === 0) {
-		//this.emit('diag', "Abort string processing.");
-		return Promise.resolve(false); // Stop processing strings
-	}
-
-	if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.ZONE_NAME.typeId) {
-		for (let i = 0; i < this.zones.length; ++i) {
-			if (controlData.stringAddress === this.zones[i].zoneId) {
-				this.zones[i].zoneName = controlData.stringValue;
-				return Promise.resolve(true); // Keep processing
-			}
-		}
-	}
-	else if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.THERMOSTAT_NAME.typeId) {
-		for (let i = 0; i < this.thermostats.length; ++i) {
-			if (controlData.stringAddress === this.thermostats[i].thermostatId) {
-				this.thermostats[i].thermostatName = controlData.stringValue;
-				this.thermostats[i].enabled = true;
-				this.emit('diag', "Thermostat: " + this.thermostats[i].thermostatId + " - " + this.thermostats[i].thermostatName);
-				return Promise.resolve(true); // Keep processing
-			}
-		}
-	}
-	else if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.LIGHT_NAME.typeId) {
-		for (let i = 0; i < this.lights.length; ++i) {
-			if (controlData.stringAddress === this.lights[i].lightId) {
-				this.lights[i].lightName = controlData.stringValue;
-				this.lights[i].enabled = true;
-				this.emit('diag', "Light: " + this.lights[i].lightId + " - " + this.lights[i].lightName);
-				return Promise.resolve(true); // Keep processing
-			}
-		}
-	}
-	return Promise.resolve(true); // Keep processing
-}
-
-M1Control.prototype.createControlRequestChain = function(items, processIf, getRequest, handleError) {
+M1Control.prototype.createControlRequestChain = function(items, processIf, getRequest, handleError, messageHandler) {
 	var promiseChain = null;
-	var updateThisControl = this.updateControl.bind(this);
+	var updateThisControl = this.updateControl.bind(this, messageHandler);
 	// Check all the individual items
 	for (let i = 0; i < items.length; ++i) {
 		if (processIf(items[i])) {
@@ -172,7 +130,7 @@ M1Control.prototype.createControlRequestChain = function(items, processIf, getRe
 	return promiseChain;
 }
 
-M1Control.prototype.updateControlStrings = function(stringType, items, getItemId, updateIf) {
+M1Control.prototype.updateControlStrings = function(stringType, items, getItemId, updateIf, messageHandler) {
 	return this.createControlRequestChain(items, 
 										updateIf, 
 										(item) => { 
@@ -180,20 +138,8 @@ M1Control.prototype.updateControlStrings = function(stringType, items, getItemId
 										}, 
 										(reason) => { 
 											this.emit('diag', "Warning: Failed to get control names of type: " + stringType.stringDefinitionTypeDescription + " Reason: " + reason); 
-										});
-}
-
-M1Control.prototype.updateControlThermostatData = function(obj, controlData) {
-	for (let i = 0; i < this.thermostats.length; ++i) {
-		if (controlData.thermostatId === this.thermostats[i].thermostatId) {
-			let thermostatName = this.thermostats[i].thermostatName;
-			this.thermostats[i] = controlData;
-			this.thermostats[i].thermostatName = thermostatName;
-			this.emit('diag', "Thermostat Data: " + this.thermostats[i].thermostatId + " - " + this.thermostats[i].currentTemp + " degF  Mode: " + this.thermostats[i].mode.toString());
-			return Promise.resolve(true); // Keep processing
-		}
-	}
-	return Promise.resolve(true); // Keep processing
+										},
+										messageHandler);
 }
 
 M1Control.prototype.sendRawDataToControl = function(rawMessage) {
@@ -237,7 +183,7 @@ M1Control.prototype.handleControlEvent = function(obj) {
 	this.emit(messageCommand, obj);
 
 	// Perhaps this is relevant to us?  Check it out on the next event loop tick
-	setTimeout(this.updateControl.bind(this, obj), 0);
+	setTimeout(this.updateControl.bind(this, null, obj), 0);
 }
 
 M1Control.prototype.printZoneDefinitions = function() {
@@ -250,7 +196,10 @@ M1Control.prototype.printZoneDefinitions = function() {
 
 M1Control.prototype.updateZoneDefinitions = function() {
 	var zd = new controlMessages.ZoneDefinitionRequest();
-	var updateThisControl = this.updateControl.bind(this);
+	var updateThisControl = this.updateControl.bind(this, (controlData) => {
+		this.zones = controlData;
+		return true; // Keep processing
+	});
 	var updateThisZoneNames = this.updateZoneNames.bind(this);
 	var printThisDefinitions = this.printZoneDefinitions.bind(this);
 	return zd.request(this).then(updateThisControl).then(updateThisZoneNames).then(printThisDefinitions);
@@ -264,6 +213,20 @@ M1Control.prototype.updateZoneNames = function() {
 								  	}, 
 								  	(item) => {
 								  		return !item.zoneName;
+									},
+									(controlData) => {
+										if (controlData.stringAddress === 0) {
+											return false; // Stop processing strings
+										}
+										if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.ZONE_NAME.typeId) {
+											for (let i = 0; i < this.zones.length; ++i) {
+												if (controlData.stringAddress === this.zones[i].zoneId) {
+													this.zones[i].zoneName = controlData.stringValue;
+													return true; // Keep processing
+												}
+											}
+										}
+										return true; // Keep processing anyway
 									});
 }
 
@@ -284,7 +247,37 @@ M1Control.prototype.updateThermostatNames = function() {
 								  	}, 
 								  	(item) => {
 								  		return !item.thermostatName;
+									},
+									(controlData) => {
+										if (controlData.stringAddress === 0) {
+											return false; // Stop processing strings
+										}
+										if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.THERMOSTAT_NAME.typeId) {
+											for (let i = 0; i < this.thermostats.length; ++i) {
+												if (controlData.stringAddress === this.thermostats[i].thermostatId) {
+													this.thermostats[i].thermostatName = controlData.stringValue;
+													this.thermostats[i].enabled = true;
+													this.emit('diag', "Thermostat: " + this.thermostats[i].thermostatId + " - " + this.thermostats[i].thermostatName);
+													return true; // Keep processing
+												}
+											}
+										}
+										return true; // Keep processing anyway
 									});
+}
+
+M1Control.prototype.updateThermostatTemperature = function(controlData) {
+	for (let i = 0; i < this.thermostats.length; ++i) {
+		if (controlData.thermostatId === this.thermostats[i].thermostatId) {
+			let thermostatName = this.thermostats[i].thermostatName;
+			this.thermostats[i] = controlData;
+			this.thermostats[i].thermostatName = thermostatName;
+			this.emit('diag', "Thermostat Data: " + this.thermostats[i].thermostatId + " - " 
+				+ this.thermostats[i].currentTemp + " degF  Mode: " + this.thermostats[i].mode.toString());
+			return true; // Keep processing
+		}
+	}
+	return true; // Keep processing anyway
 }
 
 M1Control.prototype.updateThermostatTemperatures = function() {
@@ -297,6 +290,9 @@ M1Control.prototype.updateThermostatTemperatures = function() {
 									}, 
 									(reason) => { 
 										this.emit('diag', "Failed to get temperature data: " + reason); 
+									},
+									(controlData) => {
+										return this.updateThermostatTemperature(controlData);
 									});
 }
 
@@ -316,6 +312,22 @@ M1Control.prototype.updateLightNames = function() {
 							  	}, 
 							  	(item) => {
 							  		return !item.lightName;
+								},
+								(controlData) => {
+									if (controlData.stringAddress === 0) {
+										return false; // Stop processing strings
+									}
+									if (controlData.stringType === controlMessages.ASCIIStringDefinitionType.LIGHT_NAME.typeId) {
+										for (let i = 0; i < this.lights.length; ++i) {
+											if (controlData.stringAddress === this.lights[i].lightId) {
+												this.lights[i].lightName = controlData.stringValue;
+												this.lights[i].enabled = true;
+												this.emit('diag', "Light: " + this.lights[i].lightId + " - " + this.lights[i].lightName);
+												return true; // Keep processing
+											}
+										}
+									}
+									return true; // Keep processing anyway
 								});
 }
 
