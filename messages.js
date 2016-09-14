@@ -22,6 +22,8 @@ var ControlMessageType = {
 	UNDEFINED : "undefined",
 	ZONE_DEFINITION_REQUEST : "zd",
 	ZONE_DEFINITION_REPLY : "ZD",
+	ZONE_STATUS_REQUEST : "zs",
+	ZONE_STATUS_REPLY : "ZS",
 	ASCII_STRING_DEFINITION_REQUEST : "sd",
 	ASCII_STRING_DEFINITION_REPLY : "SD",
 	ZONE_CHANGE_UPDATE : "ZC",
@@ -224,6 +226,115 @@ ZoneDefinitionRequest.prototype.sendToControl=function(control) {
 	this.sendRawMessage(control);
 }
 
+function createZoneStatus(id, description) {
+	return { id: id, description: description };
+}
+
+var ZoneStatusHigh = {
+	NORMAL : createZoneStatus(0b00, "Normal"),
+	TROUBLE : createZoneStatus(0b01, "Trouble"),
+	VIOLATED : createZoneStatus(0b10, "Violated"),
+	BYPASSED : createZoneStatus(0b11, "Bypassed")
+}
+
+var ZoneStatusLow = {
+	UNCONFIGURED : createZoneStatus(0b00, "Unconfigured"),
+	OPEN : createZoneStatus(0b01, "Open"),
+	EOL : createZoneStatus(0b10, "EOL"),
+	SHORT : createZoneStatus(0b11, "Short")
+}
+
+function ZoneChangeUpdate(){
+	this.command = ControlMessageType.ZONE_CHANGE_UPDATE;
+}
+ZoneChangeUpdate.prototype = new ControlMessage();
+ZoneChangeUpdate.prototype.constructor = ZoneChangeUpdate;
+ZoneChangeUpdate.prototype.messageTypeString=function() {
+	return "Zone Change Update";
+}
+
+ZoneChangeUpdate.prototype.getControlData = function() {
+	var zoneChangeInfo = this.getPayload();
+	var zoneId = parseInt(zoneChangeInfo.substring(0,3));
+	var zoneStatus = parseInt(zoneChangeInfo.substring(3,4), 16); // Hex value
+
+	var lowNibble = zoneStatus & 0b0011; // Mask off the low nibble
+	var highNibble = (zoneStatus & 0b1100) >> 2; // Mask off the high nibble
+
+	var returnVal = { zoneId: zoneId, zoneStatusHigh: null, zoneStatusLow: null };
+
+	var key = null;
+	for (key in ZoneStatusHigh) {
+		if (highNibble === ZoneStatusHigh[key].id) {
+			returnVal.zoneStatusHigh = ZoneStatusHigh[key];
+		}
+	}
+	for (key in ZoneStatusLow) {
+		if (highNibble === ZoneStatusLow[key].id) {
+			returnVal.zoneStatusLow = ZoneStatusLow[key];
+		}
+	}
+
+	return new ControlDataResult(true, "Success.", returnVal);
+}
+
+function ZoneStatusReply(){
+	this.command = ControlMessageType.ZONE_STATUS_REPLY;
+}
+ZoneStatusReply.prototype = new ControlMessage();
+ZoneStatusReply.prototype.constructor = ZoneStatusReply;
+ZoneStatusReply.prototype.messageTypeString=function() {
+	return "Zone Status Reply";
+}
+ZoneStatusReply.prototype.getControlData=function() {
+	var zones = [];
+	var zoneData = this.getPayload();
+	if (zoneData.length != 210)
+	{
+		// Zone status must be 208 zones plus a reserved 00 sequence
+		return new ControlDataResult(false, "Invalid zone status data.");
+	}
+
+	for (let i = 0; i < zoneData.length-2; ++i)
+	{
+		var zoneStatus = parseInt(zoneData.charAt(i), 16);
+
+		var lowNibble = zoneStatus & 0b0011; // Mask off the low nibble
+		var highNibble = (zoneStatus & 0b1100) >> 2; // Mask off the high nibble
+
+		var curZoneData = { zoneId: i+1, zoneStatusHigh: null, zoneStatusLow: null };
+
+		var key = null;
+		for (key in ZoneStatusHigh) {
+			if (highNibble === ZoneStatusHigh[key].id) {
+				curZoneData.zoneStatusHigh = ZoneStatusHigh[key];
+			}
+		}
+		for (key in ZoneStatusLow) {
+			if (highNibble === ZoneStatusLow[key].id) {
+				curZoneData.zoneStatusLow = ZoneStatusLow[key];
+			}
+		}
+
+		zones.push(curZoneData);
+	}
+
+	return new ControlDataResult(true, "Success.", zones);
+}
+
+function ZoneStatusRequest(){
+	this.command = ControlMessageType.ZONE_STATUS_REQUEST;
+	this.responseType = ControlMessageType.ZONE_STATUS_REPLY;
+}
+ZoneStatusRequest.prototype = new ControlRequest();
+ZoneStatusRequest.prototype.constructor = ZoneStatusRequest;
+ZoneStatusRequest.prototype.sendToControl=function(control) {
+	var payload = this.command + "00"; // Add reserved bytes
+	this.setMessage(payload);
+
+	this.sendRawMessage(control);
+}
+
 
 function createASCIIStringDefinitionType(typeNum, maxValue, stringDescription) {
 	return { typeId:  typeNum, maxValue: maxValue, stringDefinitionTypeDescription: stringDescription };
@@ -295,58 +406,6 @@ ASCIIStringDefinitionRequest.prototype.sendToControl=function(control) {
 	this.sendRawMessage(control);
 }
 
-function createZoneStatus(id, description) {
-	return { id: id, description: description };
-}
-
-var ZoneStatusHigh = {
-	NORMAL : createZoneStatus(0b00, "Normal"),
-	TROUBLE : createZoneStatus(0b01, "Trouble"),
-	VIOLATED : createZoneStatus(0b10, "Violated"),
-	BYPASSED : createZoneStatus(0b11, "Bypassed")
-}
-
-var ZoneStatusLow = {
-	UNCONFIGURED : createZoneStatus(0b00, "Unconfigured"),
-	OPEN : createZoneStatus(0b01, "Open"),
-	EOL : createZoneStatus(0b10, "EOL"),
-	SHORT : createZoneStatus(0b11, "Short")
-}
-
-function ZoneChangeUpdate(){
-	this.command = ControlMessageType.ZONE_CHANGE_UPDATE;
-}
-ZoneChangeUpdate.prototype = new ControlMessage();
-ZoneChangeUpdate.prototype.constructor = ZoneChangeUpdate;
-ZoneChangeUpdate.prototype.messageTypeString=function() {
-	return "Zone Change Update";
-}
-
-ZoneChangeUpdate.prototype.getZoneChangeInfo = function() {
-	var zoneChangeInfo = this.getPayload();
-	var zoneId = parseInt(zoneChangeInfo.substring(0,3));
-	var zoneStatus = parseInt(zoneChangeInfo.substring(3,4), 16); // Hex value
-
-	var lowNibble = zoneStatus & 0b0011; // Mask off the low nibble
-	var highNibble = (zoneStatus & 0b1100) >> 2; // Mask off the high nibble
-
-	var returnVal = { zoneId: zoneId, zoneStatusHigh: null, zoneStatusLow: null };
-
-	var key = null;
-	for (key in ZoneStatusHigh) {
-		if (highNibble === ZoneStatusHigh[key].id) {
-			returnVal.zoneStatusHigh = ZoneStatusHigh[key];
-		}
-	}
-	for (key in ZoneStatusLow) {
-		if (highNibble === ZoneStatusLow[key].id) {
-			returnVal.zoneStatusLow = ZoneStatusLow[key];
-		}
-	}
-
-	return returnVal;
-}
-
 function CreateThermostatData(id, enabled, mode, hold, fan, currentTemp, heatSetPoint, coolSetPoint, humidity) {
 	return {
 		thermostatId: id,
@@ -407,8 +466,9 @@ ThermostatDataReply.prototype.getControlData=function() {
 // Only include types that the control sends back to us (no requests)
 var ControlMessageConstructors = { };
 ControlMessageConstructors[ControlMessageType.ZONE_DEFINITION_REPLY.toString()] = ZoneDefinitionReply;
-ControlMessageConstructors[ControlMessageType.ASCII_STRING_DEFINITION_REPLY.toString()] = ASCIIStringDefinitionReply;
 ControlMessageConstructors[ControlMessageType.ZONE_CHANGE_UPDATE.toString()] = ZoneChangeUpdate;
+ControlMessageConstructors[ControlMessageType.ZONE_STATUS_REPLY.toString()] = ZoneStatusReply;
+ControlMessageConstructors[ControlMessageType.ASCII_STRING_DEFINITION_REPLY.toString()] = ASCIIStringDefinitionReply;
 ControlMessageConstructors[ControlMessageType.THERMOSTAT_DATA_REPLY.toString()] = ThermostatDataReply;
 
 function ParseControlMessage(rawMessage) {
@@ -444,6 +504,8 @@ module.exports = {
 	ZoneChangeUpdate: ZoneChangeUpdate,
 	ZoneDefinitionRequest: ZoneDefinitionRequest,
 	ZoneDefinitionReply: ZoneDefinitionReply,
+	ZoneStatusRequest: ZoneStatusRequest,
+	ZoneStatusReply: ZoneStatusReply,
 	ASCIIStringDefinitionRequest: ASCIIStringDefinitionRequest,
 	ASCIIStringDefinitionReply: ASCIIStringDefinitionReply,
 	ThermostatDataRequest: ThermostatDataRequest,

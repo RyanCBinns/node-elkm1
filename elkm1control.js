@@ -82,10 +82,12 @@ M1Control.prototype.updateControl = function(messageHandler, obj) {
 		return Promise.resolve(messageHandler(controlDataResult.controlData));
 	}
 
-	// Default handlers  (Mostly unsolicited events)
-	if (obj instanceof controlMessages.ThermostatDataReply) {
-		return Promise.resolve(this.updateThermostatTemperature(controlDataResult.controlData));
-	}
+	// Default handlers  (unsolicited events)
+	this.defaultMessageHandlers.forEach((messageHandler) => {
+		if (obj instanceof messageHandler.message) {
+			return Promise.resolve(messageHandler.handler.call(this, controlDataResult.controlData));
+		}
+	});
 
 	// Default
 	return Promise.resolve(true); // Keep processing
@@ -202,7 +204,8 @@ M1Control.prototype.updateZoneDefinitions = function() {
 	});
 	var updateThisZoneNames = this.updateZoneNames.bind(this);
 	var printThisDefinitions = this.printZoneDefinitions.bind(this);
-	return zd.request(this).then(updateThisControl).then(updateThisZoneNames).then(printThisDefinitions);
+	var updateThisAllZoneStatus = this.updateAllZoneStatus.bind(this);
+	return zd.request(this).then(updateThisControl).then(updateThisZoneNames).then(printThisDefinitions).then(updateThisAllZoneStatus);
 }
 
 M1Control.prototype.updateZoneNames = function() {
@@ -228,6 +231,31 @@ M1Control.prototype.updateZoneNames = function() {
 										}
 										return true; // Keep processing anyway
 									});
+}
+
+M1Control.prototype.updateZoneStatus = function(zoneStatus) {
+	for (let i = 0; i < this.zones.length; ++i) {
+		if (zoneStatus.zoneId === this.zones[i].zoneId) {
+			let zoneName = "";
+			if (this.zones[i].zoneName)
+				zoneName = this.zones[i].zoneName;
+			this.emit('diag',"Zone change: " + zoneName + " (" + zoneStatus.zoneId + ") - Status High: " + zoneStatus.zoneStatusHigh.description);
+			this.zones[i].zoneStatusHigh = zoneStatus.zoneStatusHigh;
+			this.zones[i].zoneStatusLow = zoneStatus.zoneStatusLow;
+			break;
+		}
+	}
+}
+
+M1Control.prototype.updateAllZoneStatus = function() {
+	var zs = new controlMessages.ZoneStatusRequest();
+	var updateThisControl = this.updateControl.bind(this, (controlData) => {
+		for (let i = 0; i < controlData.length; ++i) {
+			this.updateZoneStatus(controlData[i]);
+		}
+		return true; // Keep processing
+	});
+	return zs.request(this).then(updateThisControl);
 }
 
 M1Control.prototype.updateThermostatDefinitions = function() {
@@ -335,6 +363,9 @@ M1Control.prototype.updateLightNames = function() {
 M1Control.prototype.controlInitSequence = [M1Control.prototype.updateZoneDefinitions,
 										   M1Control.prototype.updateThermostatDefinitions,
 										   M1Control.prototype.updateLightDefinitions];
+
+M1Control.prototype.defaultMessageHandlers = [{message: controlMessages.ZoneChangeUpdate    ,  handler: M1Control.prototype.updateZoneStatus           },
+											  {message: controlMessages.ThermostatDataReply ,  handler: M1Control.prototype.updateThermostatTemperature}];
 
 module.exports.M1Control = M1Control;
 module.exports.Messages = controlMessages;

@@ -20,7 +20,7 @@ m1Control.on('debug', (logmessage) => {
 
 m1Control.on('any', (message) => {
 	if (message instanceof M1Control.Messages.ZoneChangeUpdate) {
-		var zoneChangeInfo = message.getZoneChangeInfo();
+		var zoneChangeInfo = message.getControlData().controlData;
 		console.log("Zone change: " + zoneChangeInfo.zoneId + " Status High: " + zoneChangeInfo.zoneStatusHigh.description);
 	}
 });
